@@ -1,0 +1,12 @@
+# requirements.txt
+streamlit
+pandas
+numpy
+plotly
+st-aggrid
+langchain
+chromadb
+openai
+
+# Optional for local dev
+python-dotenv

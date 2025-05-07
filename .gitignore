@@ -1,0 +1,41 @@
+# .gitignore para o projeto Painel Unimed
+
+# Ignorar ambientes virtuais
+venv/
+unimedvenv/
+.env/
+
+# Ignorar arquivos de cache do Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignorar configurações locais do editor
+.vscode/
+.idea/
+*.swp
+
+# Ignorar arquivos temporários
+*.log
+*.tmp
+*.bak
+
+# Ignorar dados locais
+uploads/
+*.csv
+*.xlsx
+*.json
+
+# Ignorar arquivos específicos do Streamlit
+.streamlit/config.toml
+
+# Ignorar dependências geradas
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Ignorar arquivos do sistema
+.DS_Store
+Thumbs.db
