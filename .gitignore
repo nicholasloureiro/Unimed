@@ -39,3 +39,7 @@ build/
 # Ignorar arquivos do sistema
 .DS_Store
 Thumbs.db
+*.txt
+*.zip
+*.db
+.env

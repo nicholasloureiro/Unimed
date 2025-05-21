@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import json
+import json # Keep for potential future use, though not actively used in main flow
 import collections # Keep for potential future use with PandasDataAnalyst
 from datetime import datetime
 
@@ -10,14 +10,6 @@ from langchain_community.chat_message_histories import StreamlitChatMessageHisto
 from langchain_openai import ChatOpenAI
 # Assuming ai_data_science_team is a custom library you have for Tab 2
 from ai_data_science_team import PandasDataAnalyst, DataWranglingAgent, DataVisualizationAgent
-
-# --- New Imports for RAG in Tab 3 --- # Actually, these are not used in the provided Tab 3 (AgGrid)
-# from langchain_openai import OpenAIEmbeddings
-# from langchain_community.vectorstores import Chroma
-# from langchain_core.documents import Document
-# from langchain_core.prompts import ChatPromptTemplate
-# from langchain_core.output_parsers import StrOutputParser
-# from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -96,7 +88,7 @@ with st.sidebar:
     st.image("unimed-removebg-preview.png", width=350)
     st.markdown("<h2 style='color: #006633;'>🔐 Configuração da IA</h2>", unsafe_allow_html=True)
     api_key = st.text_input("Chave da API da OpenAI", type="password", help="Insira sua chave da API OpenAI para ativar os recursos de IA.")
-    model_option = st.selectbox("Modelo OpenAI", ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4"], index=0) # --- MODIFIED --- Added gpt-4 as an option
+    model_option = st.selectbox("Modelo OpenAI", ["gpt-4o-mini", "gpt-3.5-turbo", "gpt-4"], index=0)
 
     st.markdown("<h2 style='color: #006633;'>📁 Upload de Dados</h2>", unsafe_allow_html=True)
     uploaded_file = st.file_uploader(
@@ -109,17 +101,13 @@ if not api_key:
     st.warning("🔑 Por favor, insira sua chave da API da OpenAI na barra lateral para habilitar as funcionalidades de IA e carregar os dados.")
     st.stop()
 
-# --- Initialize LLM and Embeddings Model (globally available if API key is present) ---
+# --- Initialize LLM (globally available if API key is present) ---
 llm = None
-# embeddings_model = None # Not currently used by AgGrid or the new Business Insights tab
 pandas_data_analyst = None # For Tab 2
 
 if api_key:
     try:
-        llm = ChatOpenAI(model=model_option, api_key=api_key, temperature=0.3) # Slightly higher temp for more creative insights
-        # embeddings_model = OpenAIEmbeddings(api_key=api_key) # Not needed for now
-
-        # Initialize agents for Tab 2 (Pandas Data Analyst)
+        llm = ChatOpenAI(model=model_option, api_key=api_key, temperature=0.3)
         data_wrangling_agent = DataWranglingAgent(model=llm, bypass_recommended_steps=True, log=False)
         data_visualization_agent = DataVisualizationAgent(model=llm, log=False)
         pandas_data_analyst = PandasDataAnalyst(
@@ -135,10 +123,13 @@ if not uploaded_file:
     st.info("⬆️ Envie um arquivo CSV com resultados de exames para prosseguir e visualizar o painel.")
     st.stop()
 
+# --- GLOBAL DEFINITIONS ---
+ALTERATION_MARKERS = ["↑", "↓", "Alto", "Baixo", "Aumentado", "Diminuído", "Positivo"]
+
 # --- DATA LOADING AND PREPROCESSING ---
 @st.cache_data
 def load_data(file):
-    df_loaded = pd.read_csv(file) # Renamed to df_loaded to avoid conflict with global df
+    df_loaded = pd.read_csv(file)
     df_loaded.columns = df_loaded.columns.str.lower().str.replace(' ', '_')
     if "data_nascimento" in df_loaded.columns:
         df_loaded["data_nascimento"] = pd.to_datetime(df_loaded["data_nascimento"], errors="coerce")
@@ -148,12 +139,12 @@ def load_data(file):
         )
     elif "idade" not in df_loaded.columns:
         st.warning("Coluna 'data_nascimento' ou 'idade' não encontrada. A funcionalidade de filtro por idade pode não funcionar.")
-        df_loaded["idade"] = None # Explicitly create if missing
+        df_loaded["idade"] = None
     
     status_cols_local = [col for col in df_loaded.columns if col.endswith("_status")]
-    if status_cols_local: # Check if status_cols is not empty
-        df_loaded["paciente_com_alteracao"] = df_loaded[status_cols_local].apply(lambda row: row.isin(["↑", "↓", "Alto", "Baixo", "Aumentado", "Diminuído", "Positivo"]).any(), axis=1)
-        df_loaded["qtde_exames_alterados"] = df_loaded[status_cols_local].apply(lambda row: sum(row.isin(["↑", "↓", "Alto", "Baixo", "Aumentado", "Diminuído", "Positivo"])), axis=1)
+    if status_cols_local:
+        df_loaded["paciente_com_alteracao"] = df_loaded[status_cols_local].apply(lambda row: row.isin(ALTERATION_MARKERS).any(), axis=1)
+        df_loaded["qtde_exames_alterados"] = df_loaded[status_cols_local].apply(lambda row: sum(row.isin(ALTERATION_MARKERS)), axis=1)
     else:
         df_loaded["paciente_com_alteracao"] = False
         df_loaded["qtde_exames_alterados"] = 0
@@ -161,27 +152,34 @@ def load_data(file):
     return df_loaded, status_cols_local
 
 try:
-    df, status_cols = load_data(uploaded_file) # df is now the global DataFrame
+    df, status_cols = load_data(uploaded_file)
 except Exception as e:
     st.error(f"Erro ao carregar ou processar o arquivo: {e}")
     st.stop()
 
-if not status_cols and uploaded_file: # Check after df is loaded
+if not status_cols and uploaded_file:
     st.error("Nenhuma coluna de status de exame (terminada em '_status') foi encontrada no arquivo após o processamento. Verifique o formato do CSV. Algumas funcionalidades de insights podem não funcionar como esperado.")
 
-# Calculate top altered exams (if status_cols exist)
-top_alterados_df = pd.DataFrame(columns=["Exame", "Número de Alterações"]) # Default empty
-if status_cols and not df.empty:
+# --- HELPER FUNCTION TO CALCULATE TOP ALTERED EXAMS (from second script) ---
+def calculate_top_altered_exams(dataframe, status_column_list, markers):
+    if dataframe.empty or not status_column_list:
+        return pd.DataFrame(columns=["Exame", "Número de Alterações"])
     alteracoes = collections.Counter()
-    for col in status_cols:
-        exam_name = col.replace("_status", "").replace("_", " ").title()
-        alteracoes[exam_name] += df[col].isin(["↑", "↓", "Alto", "Baixo", "Aumentado", "Diminuído", "Positivo"]).sum()
+    for col in status_column_list:
+        if col in dataframe.columns: # Ensure column exists
+            exam_name = col.replace("_status", "").replace("_", " ").title()
+            alteracoes[exam_name] += dataframe[col].isin(markers).sum()
     if alteracoes:
-        top_alterados_df = pd.DataFrame.from_dict(alteracoes, orient="index", columns=["Número de Alterações"])
-        top_alterados_df = top_alterados_df.sort_values(by="Número de Alterações", ascending=False).reset_index().rename(columns={"index": "Exame"})
+        df_top_altered = pd.DataFrame.from_dict(alteracoes, orient="index", columns=["Número de Alterações"])
+        df_top_altered = df_top_altered.sort_values(by="Número de Alterações", ascending=False).reset_index().rename(columns={"index": "Exame"})
+        return df_top_altered[df_top_altered["Número de Alterações"] > 0] # Filter out exams with 0 alterations
+    return pd.DataFrame(columns=["Exame", "Número de Alterações"])
+
+# Calculate top altered exams for the global dataset
+top_alterados_df = calculate_top_altered_exams(df, status_cols, ALTERATION_MARKERS)
 
 
-def generate_dynamic_insights(current_df, current_status_cols, current_top_alterados_df):
+def generate_dynamic_insights(current_df, current_status_cols, current_top_alterados_df): # Removed markers_unused
     insights_list = []
     THRESHOLD_MULTIPLE_ALTERATIONS = 3
 
@@ -272,12 +270,12 @@ def generate_dynamic_insights(current_df, current_status_cols, current_top_alter
 
 
 # --- TABS ---
-# --- MODIFIED --- Added tab4
+# --- Tab name for Tab 4 changed to reflect its new dynamic functionality ---
 tab1, tab2, tab3, tab4 = st.tabs([
     "📊 Visão Geral e Filtros Interativos",
     "🤖 Chat Analítico (Dados Filtrados)",
     "📋 Visualização Geral dos Dados com AgGrid",
-    "💡 Insights de Negócios (IA)"
+    "💡 Insights Dinâmicos (IA)" # Changed tab name
 ])
 
 
@@ -288,13 +286,14 @@ with tab1:
 
     with st.container(border=True):
         st.subheader("Resumo Geral dos Pacientes (Dataset Completo)")
-        dynamic_insights = generate_dynamic_insights(df, status_cols, top_alterados_df)
+        # Pass the globally calculated top_alterados_df
+        dynamic_insights_global = generate_dynamic_insights(df, status_cols, top_alterados_df)
 
-        if dynamic_insights:
+        if dynamic_insights_global:
             row1_cols = st.columns(3)
             row2_cols = st.columns(3)
 
-            for i, insight in enumerate(dynamic_insights):
+            for i, insight in enumerate(dynamic_insights_global):
                 target_col = row1_cols[i] if i < 3 else row2_cols[i-3]
                 with target_col:
                     st.markdown(f"""
@@ -309,7 +308,7 @@ with tab1:
 
     st.markdown("### 🔬 Filtros Detalhados e Visualização de Dados (Interativo)")
 
-    df_filtrado_tab1 = df.copy()
+    df_filtrado_tab1 = df.copy() # Initialize df_filtrado_tab1 for Tab 1 filters
 
     with st.expander("🔬 Ajuste os Filtros para Refinar sua Análise:", expanded=True):
         col_filt1, col_filt2 = st.columns([1, 2])
@@ -318,7 +317,7 @@ with tab1:
             if "idade" in df_filtrado_tab1.columns and df_filtrado_tab1["idade"].notna().any():
                 idade_min_val = int(df_filtrado_tab1["idade"].dropna().min())
                 idade_max_val = int(df_filtrado_tab1["idade"].dropna().max())
-                if idade_min_val < idade_max_val: # Ensure min < max for slider
+                if idade_min_val < idade_max_val:
                     faixa_idade = st.slider(
                         "Filtrar por Faixa Etária:",
                         min_value=idade_min_val,
@@ -329,14 +328,14 @@ with tab1:
                     df_filtrado_tab1 = df_filtrado_tab1[df_filtrado_tab1["idade"].between(faixa_idade[0], faixa_idade[1])]
                 elif idade_min_val == idade_max_val:
                      st.caption(f"Todos os pacientes filtrados têm a mesma idade: {idade_min_val} anos.")
-                else: # Should not happen if data is consistent
+                else:
                     st.caption("Dados de idade inconsistentes para criar o filtro.")
             else:
                 st.caption("Filtro de idade indisponível (dados ausentes ou não aplicáveis).")
 
             if "sexo" in df_filtrado_tab1.columns and df_filtrado_tab1["sexo"].notna().any():
                 sexo_opcoes = sorted(df_filtrado_tab1["sexo"].dropna().unique())
-                if sexo_opcoes:
+                if sexo_opcoes: # Check if list is not empty
                     sexo_sel = st.radio(
                         "Filtrar por Sexo:",
                         options=["Todos"] + sexo_opcoes,
@@ -367,7 +366,6 @@ with tab1:
                      st.caption("Nenhum paciente no filtro atual possui exames alterados.")
                 elif min_alt == max_alt:
                     st.caption(f"Todos os pacientes no filtro atual possuem {min_alt} exame(s) alterado(s).")
-
             else:
                 st.caption("Filtro de quantidade de alterações indisponível.")
 
@@ -379,17 +377,18 @@ with tab1:
                 options=exames_nomes_limpos,
                 help="Escolha um ou mais exames para aplicar filtros de status/valor e para gerar gráficos comparativos (correlação, dispersão).",
                 key="tab1_exames_multiselect",
-                disabled=not status_cols
+                disabled=not status_cols # Disable if no status_cols found
             )
+            # Convert selected display names back to original status column names
             exames_status_selecionados = [status_cols[exames_nomes_limpos.index(nome)] for nome in exames_selecionados_nomes]
 
 
-        if exames_status_selecionados:
+        if exames_status_selecionados: # Only show if exams are selected
             st.markdown("##### Filtros Avançados por Exame Selecionado:")
             filtros_status = {}
             filtros_valores = {}
 
-            num_cols_filter = min(len(exames_status_selecionados), 3)
+            num_cols_filter = min(len(exames_status_selecionados), 3) # Max 3 columns for filters
             filter_cols = st.columns(num_cols_filter)
             col_idx = 0
 
@@ -397,11 +396,13 @@ with tab1:
                 exame_base = exame_status_col.removesuffix("_status")
                 exame_display_name = exame_base.replace("_", " ").title()
 
-                with filter_cols[col_idx % num_cols_filter]:
+                with filter_cols[col_idx % num_cols_filter]: # Cycle through columns
+                        # Status filter for the selected exam
                         unique_status_vals = df_filtrado_tab1[exame_status_col].dropna().unique()
                         if len(unique_status_vals) > 0:
                             status_options = ["Todos"] + list(unique_status_vals)
-                            priority_status = ["↑", "↓", "Positivo", "Alto", "Baixo", "Aumentado", "Diminuído"]
+                            # Prioritize common alteration markers in options for easier access
+                            priority_status = ALTERATION_MARKERS
                             remaining_options = [opt for opt in status_options if opt not in ["Todos"] + priority_status]
                             sorted_status_options = ["Todos"] + [p for p in priority_status if p in status_options] + sorted(remaining_options)
 
@@ -409,15 +410,15 @@ with tab1:
                                 f"Status de {exame_display_name}:",
                                 options=sorted_status_options,
                                 key=f"tab1_{exame_base}_status_radio",
-                                horizontal=True
+                                horizontal=True # Display radio buttons horizontally
                             )
                             filtros_status[exame_status_col] = status_sel
                         else:
                             st.caption(f"Status para {exame_display_name} não disponível/variado nos dados filtrados.")
 
-
+                        # Value range filter for the selected exam (if numeric)
                         if exame_base in df_filtrado_tab1.columns and pd.api.types.is_numeric_dtype(df_filtrado_tab1[exame_base]):
-                            if df_filtrado_tab1[exame_base].notna().any():
+                            if df_filtrado_tab1[exame_base].notna().any(): # Check if there are any non-NaN values
                                 min_val_exam = float(df_filtrado_tab1[exame_base].dropna().min())
                                 max_val_exam = float(df_filtrado_tab1[exame_base].dropna().max())
                                 if min_val_exam < max_val_exam :
@@ -439,6 +440,7 @@ with tab1:
                                 st.caption(f"Valores numéricos para {exame_display_name} não disponíveis para filtro.")
                 col_idx +=1
 
+            # Apply collected filters
             for exame_status_col in exames_status_selecionados:
                 exame_base = exame_status_col.removesuffix("_status")
                 status_sel = filtros_status.get(exame_status_col)
@@ -454,22 +456,25 @@ with tab1:
         if df_filtrado_tab1.empty:
             st.warning("Nenhum paciente corresponde aos filtros selecionados.")
         else:
-            colunas_base = ["nome", "codigo_os","sexo"]
+            # Define base columns and add dynamic columns based on selected exams
+            colunas_base = ["nome", "codigo_os","sexo"] # Add other relevant base columns if they exist
             if "idade" in df_filtrado_tab1.columns:
                 colunas_base.append("idade")
             if "qtde_exames_alterados" in df_filtrado_tab1.columns:
                 colunas_base.append("qtde_exames_alterados")
 
             colunas_dinamicas_selecionadas = []
-            for exame_status_col in exames_status_selecionados:
+            for exame_status_col in exames_status_selecionados: # Use the list from multiselect
                 exame_base = exame_status_col.removesuffix("_status")
-                if exame_base in df_filtrado_tab1.columns:
+                if exame_base in df_filtrado_tab1.columns: # Add value column if exists
                     colunas_dinamicas_selecionadas.append(exame_base)
-                colunas_dinamicas_selecionadas.append(exame_status_col)
+                colunas_dinamicas_selecionadas.append(exame_status_col) # Add status column
 
             colunas_finais_temp = colunas_base + colunas_dinamicas_selecionadas
+            # Ensure columns exist in the dataframe and remove duplicates while preserving order
             colunas_finais = [col for col in colunas_finais_temp if col in df_filtrado_tab1.columns]
-            colunas_finais = list(dict.fromkeys(colunas_finais)) # Remove duplicates while preserving order
+            colunas_finais = list(dict.fromkeys(colunas_finais))
+
 
             st.dataframe(df_filtrado_tab1[colunas_finais], height=300, use_container_width=True)
 
@@ -484,7 +489,7 @@ with tab1:
                             title="Distribuição do Nº de Exames Alterados (Filtrado)",
                             labels={"qtde_exames_alterados": "Quantidade de Exames Alterados por Paciente"},
                             color_discrete_sequence=["#007f3e"],
-                            marginal="rug"
+                            marginal="rug" # Adds a small plot showing individual data points
                         )
                         fig_dist_alt.update_layout(bargap=0.1, yaxis_title="Número de Pacientes")
                         if df_filtrado_tab1["qtde_exames_alterados"].notna().any(): # Ensure mean can be calculated
@@ -503,58 +508,52 @@ with tab1:
                     st.info("Não há dados de quantidade de exames alterados para exibir no histograma (coluna ausente, vazia ou sem variação).")
 
             with viz_col2:
-                 if not df_filtrado_tab1.empty and exames_status_selecionados:
-                    alteracoes_filtrado = collections.Counter()
-                    for col_stat in exames_status_selecionados:
-                        if col_stat in df_filtrado_tab1.columns:
-                            exam_name = col_stat.replace("_status", "").replace("_", " ").title()
-                            alteracoes_filtrado[exam_name] += df_filtrado_tab1[col_stat].isin(["↑", "↓", "Alto", "Baixo", "Aumentado", "Diminuído", "Positivo"]).sum()
+                 if not df_filtrado_tab1.empty and exames_status_selecionados: # Check if exams were selected
+                    # Use calculate_top_altered_exams for filtered data
+                    top_alt_filtrado_df = calculate_top_altered_exams(df_filtrado_tab1, exames_status_selecionados, ALTERATION_MARKERS)
 
-                    if sum(alteracoes_filtrado.values()) > 0:
-                        top_alt_filtrado_df = pd.DataFrame.from_dict(alteracoes_filtrado, orient="index", columns=["Alterações"])
-                        top_alt_filtrado_df = top_alt_filtrado_df.sort_values(by="Alterações", ascending=False).reset_index()
-                        top_alt_filtrado_df = top_alt_filtrado_df[top_alt_filtrado_df["Alterações"] > 0]
-
-                        if not top_alt_filtrado_df.empty:
-                            fig_top_alt_filt = px.bar(
-                                top_alt_filtrado_df,
-                                x="Alterações",
-                                y="index",
-                                orientation='h',
-                                title="Exames Selecionados Mais Alterados (Filtrado)",
-                                labels={"index": "Exame", "Alterações": "Número de Pacientes com Alteração"},
-                                color_discrete_sequence=["#007f3e"],
-                                text_auto=True
-                            )
-                            fig_top_alt_filt.update_layout(
-                                yaxis={'categoryorder':'total ascending'},
-                                xaxis_title="Número de Pacientes com Alteração"
-                            )
-                            st.plotly_chart(fig_top_alt_filt, use_container_width=True)
-                        else:
-                            st.info("Nenhuma alteração nos exames selecionados para o conjunto de dados filtrado.")
+                    if not top_alt_filtrado_df.empty:
+                        fig_top_alt_filt = px.bar(
+                            top_alt_filtrado_df,
+                            x="Número de Alterações", # Corrected column name from calculate_top_altered_exams
+                            y="Exame",               # Corrected column name
+                            orientation='h',
+                            title="Exames Selecionados Mais Alterados (Filtrado)",
+                            labels={"Exame": "Exame", "Número de Alterações": "Número de Pacientes com Alteração"},
+                            color_discrete_sequence=["#007f3e"],
+                            text_auto=True
+                        )
+                        fig_top_alt_filt.update_layout(
+                            yaxis={'categoryorder':'total ascending'}, # Show highest bar at the top
+                            xaxis_title="Número de Pacientes com Alteração"
+                        )
+                        st.plotly_chart(fig_top_alt_filt, use_container_width=True)
                     else:
-                        st.info("Nenhuma alteração para os exames selecionados neste filtro ou exames não possuem dados de status válidos para contagem.")
+                        st.info("Nenhuma alteração nos exames selecionados para o conjunto de dados filtrado.")
                  elif not exames_status_selecionados:
                     st.info("Selecione um ou mais exames nos filtros acima para ver o gráfico de alterações.")
+                 else: # df_filtrado_tab1 is empty but exams were selected
+                    st.info("Nenhum dado no filtro atual para exibir alterações dos exames selecionados.")
+
 
             st.markdown("---") 
             st.markdown("##### Mais Análises Visuais dos Dados Filtrados")
 
+            # Age distribution by alteration status
             if "idade" in df_filtrado_tab1.columns and "paciente_com_alteracao" in df_filtrado_tab1.columns and df_filtrado_tab1["idade"].notna().any():
-                if not df_filtrado_tab1.empty:
-                    df_copy_for_plot = df_filtrado_tab1.copy() 
+                if not df_filtrado_tab1.empty: # Ensure data exists for plotting
+                    df_copy_for_plot = df_filtrado_tab1.copy() # Avoid modifying the filtered df
                     df_copy_for_plot['status_alteracao_label'] = df_copy_for_plot['paciente_com_alteracao'].map({True: 'Com Alteração', False: 'Sem Alteração'})
 
                     fig_age_alt = px.histogram(
-                        df_copy_for_plot.dropna(subset=['idade']),
+                        df_copy_for_plot.dropna(subset=['idade']), # Drop rows where age is NaN for this plot
                         x="idade",
                         color="status_alteracao_label",
                         title="Distribuição de Idade por Status de Alteração Geral (Filtrado)",
                         labels={"idade": "Idade", "status_alteracao_label": "Status de Alteração"},
-                        barmode="overlay",
-                        marginal="box",
-                        color_discrete_map={'Com Alteração': '#d62728', 'Sem Alteração': '#007f3e'} 
+                        barmode="overlay", # Overlay bars for comparison
+                        marginal="box",    # Show box plots on margins
+                        color_discrete_map={'Com Alteração': '#d62728', 'Sem Alteração': '#007f3e'} # Custom colors
                     )
                     fig_age_alt.update_layout(yaxis_title="Número de Pacientes")
                     st.plotly_chart(fig_age_alt, use_container_width=True)
@@ -562,39 +561,43 @@ with tab1:
                     st.caption("Dados filtrados vazios, não é possível exibir a distribuição de idade.")
             elif "idade" not in df_filtrado_tab1.columns:
                  st.caption("Coluna 'idade' não disponível nos dados filtrados para exibir a distribuição por status de alteração.")
-            else:
+            else: # Covers case where 'paciente_com_alteracao' might be missing or 'idade' has no data
                  st.caption("Dados insuficientes ('idade' ou 'paciente_com_alteracao') para exibir a distribuição de idade por status de alteração.")
 
+            # Correlation Matrix and Scatter Plot for selected numeric exams
             selected_exam_bases_for_viz = [s.replace("_status", "") for s in exames_status_selecionados]
             numeric_exam_cols_for_viz = []
             if not df_filtrado_tab1.empty:
                 for base_name in selected_exam_bases_for_viz:
                     if base_name in df_filtrado_tab1.columns and pd.api.types.is_numeric_dtype(df_filtrado_tab1[base_name]):
+                        # Only include if there's more than one unique value (otherwise correlation is NaN or not meaningful)
                         if df_filtrado_tab1[base_name].nunique(dropna=True) > 1:
                             numeric_exam_cols_for_viz.append(base_name)
 
             if len(numeric_exam_cols_for_viz) >= 2:
                 corr_matrix = df_filtrado_tab1[numeric_exam_cols_for_viz].corr()
                 if not corr_matrix.empty and corr_matrix.shape[0] > 1 and corr_matrix.shape[1] > 1 : # Ensure matrix is not trivial
+                    # Clean names for display in the matrix
                     corr_matrix.columns = [col.replace("_", " ").title() for col in corr_matrix.columns]
                     corr_matrix.index = [idx.replace("_", " ").title() for idx in corr_matrix.index]
 
                     fig_corr_matrix = px.imshow(
                         corr_matrix,
-                        text_auto=True, 
+                        text_auto=True, # Show correlation values on the heatmap
                         aspect="auto", 
-                        color_continuous_scale='RdBu_r', 
+                        color_continuous_scale='RdBu_r', # Red-Blue diverging scale, good for correlations
                         title=f"Matriz de Correlação entre Exames Numéricos Selecionados (Filtrado)",
                         labels=dict(color="Correlação"),
                         zmin=-1, zmax=1 # Ensure full scale for correlation
                     )
-                    fig_corr_matrix.update_xaxes(side="bottom") 
+                    fig_corr_matrix.update_xaxes(side="bottom") # Move x-axis labels to bottom for readability
                     st.plotly_chart(fig_corr_matrix, use_container_width=True)
                 else:
                     st.caption("Não foi possível calcular uma matriz de correlação significativa para os exames numéricos selecionados (pouca variação ou dados insuficientes).")
             elif exames_status_selecionados and len(numeric_exam_cols_for_viz) < 2 : 
                 st.caption(f"Para a matriz de correlação, selecione pelo menos dois exames com dados numéricos distintos e variados. Encontrados válidos: {len(numeric_exam_cols_for_viz)}.")
 
+            # Scatter plot if exactly two numeric exams are selected
             if len(numeric_exam_cols_for_viz) == 2:
                 exam1_key, exam2_key = numeric_exam_cols_for_viz[0], numeric_exam_cols_for_viz[1]
                 exam1_name = exam1_key.replace("_", " ").title()
@@ -614,9 +617,10 @@ with tab1:
                 hover_data_scatter = ['nome'] if 'nome' in df_copy_for_scatter.columns else []
                 if 'idade' in df_copy_for_scatter.columns: hover_data_scatter.append('idade')
 
+                # Ensure there's data after dropping NaNs for the specific exam keys
                 if not df_copy_for_scatter.dropna(subset=[exam1_key, exam2_key]).empty:
                     fig_scatter = px.scatter(
-                        df_copy_for_scatter.dropna(subset=[exam1_key, exam2_key]),
+                        df_copy_for_scatter.dropna(subset=[exam1_key, exam2_key]), # Drop NaNs for the axes
                         x=exam1_key,
                         y=exam2_key,
                         color=color_option_scatter,
@@ -643,29 +647,30 @@ with tab2:
     st.markdown("## 🤖 Chat Analítico com IA (Dados Atuais da Aba 1)")
     st.markdown("Faça perguntas sobre os dados **visíveis na Aba 1 (aplicando os filtros)**. A IA pode ajudar a realizar análises, gerar tabelas e gráficos.")
 
+    # data_for_tab2_chat will be df_filtrado_tab1 from Tab 1
     data_for_tab2_chat = df_filtrado_tab1.copy() 
 
-    if data_for_tab2_chat.empty and not df.empty:
+    if data_for_tab2_chat.empty and not df.empty: # If filters result in empty, use full df
         st.info("Os filtros atuais na Aba 1 resultaram em nenhum dado. O chat abaixo operará sobre o conjunto de dados completo.")
-        data_for_tab2_chat = df.copy()
-    elif data_for_tab2_chat.empty and df.empty: 
+        data_for_tab2_chat = df.copy() # Fallback to the original full dataframe
+    elif data_for_tab2_chat.empty and df.empty: # Should not happen if file is uploaded
         st.error("Nenhum dado carregado para o chat.")
-        st.stop() # Stop if df itself is empty
+        st.stop() # Stop if df itself is empty and therefore data_for_tab2_chat is also empty
 
     with st.container(border=True):
-        msgs_tab2 = StreamlitChatMessageHistory(key="langchain_unimed_messages_tab2")
+        msgs_tab2 = StreamlitChatMessageHistory(key="langchain_unimed_messages_tab2") # Unique key for this tab's chat
         if "plots_tab2" not in st.session_state:
             st.session_state.plots_tab2 = []
         if "dataframes_tab2" not in st.session_state:
             st.session_state.dataframes_tab2 = []
 
         if len(msgs_tab2.messages) == 0:
-            initial_message_tab2 = "Olá! Como posso te ajudar a analisar os dados"
-            if data_for_tab2_chat.equals(df) and not df_filtrado_tab1.empty: # Check if df_filtrado_tab1 was not empty before reset
+            initial_message_tab2 = "Olá! Sou sua assistente de IA. Como posso te ajudar a analisar os dados"
+            if data_for_tab2_chat.equals(df) and not df_filtrado_tab1.empty: # Using full df because no effective filter
                  initial_message_tab2 += " **gerais** (nenhum filtro ativo ou os filtros resultaram em todos os dados)?"
             elif data_for_tab2_chat.equals(df) and df_filtrado_tab1.empty: # Filtered resulted in empty, so using full df
                  initial_message_tab2 += " **gerais** (os filtros não retornaram dados, então usando o dataset completo)?"
-            else:
+            else: # Using filtered data
                  initial_message_tab2 += " **filtrados** da Aba 1?"
             msgs_tab2.add_ai_message(initial_message_tab2)
 
@@ -673,22 +678,32 @@ with tab2:
         def display_chat_history_tab2():
             for i, msg in enumerate(msgs_tab2.messages):
                 with st.chat_message(msg.type):
-                    if "PLOT_INDEX_TAB2:" in msg.content:
+                    # Check if content is a string before attempting string operations
+                    if isinstance(msg.content, str) and "PLOT_INDEX_TAB2:" in msg.content:
                         try:
-                            idx = int(msg.content.split("PLOT_INDEX_TAB2:")[1])
+                            parts = msg.content.split("PLOT_INDEX_TAB2:")
+                            text_content = parts[0]
+                            if text_content.strip(): st.markdown(text_content) # Display text before plot
+                            idx = int(parts[1])
                             st.plotly_chart(st.session_state.plots_tab2[idx], use_container_width=True)
-                        except (IndexError, ValueError) as e:
+                        except (IndexError, ValueError, TypeError) as e: # Added TypeError for robustness
                             st.error(f"Erro ao exibir gráfico: {e}. Conteúdo: {msg.content}")
-                            st.markdown(msg.content.split("PLOT_INDEX_TAB2:")[0]) 
-                    elif "DATAFRAME_INDEX_TAB2:" in msg.content:
+                            # Fallback to display raw content or part of it
+                            if isinstance(msg.content, str):
+                                st.markdown(msg.content.split("PLOT_INDEX_TAB2:")[0] if "PLOT_INDEX_TAB2:" in msg.content else msg.content)
+                    elif isinstance(msg.content, str) and "DATAFRAME_INDEX_TAB2:" in msg.content:
                         try:
-                            idx = int(msg.content.split("DATAFRAME_INDEX_TAB2:")[1])
+                            parts = msg.content.split("DATAFRAME_INDEX_TAB2:")
+                            text_content = parts[0]
+                            if text_content.strip(): st.markdown(text_content) # Display text before dataframe
+                            idx = int(parts[1])
                             st.dataframe(st.session_state.dataframes_tab2[idx], use_container_width=True)
-                        except (IndexError, ValueError) as e:
+                        except (IndexError, ValueError, TypeError) as e: # Added TypeError
                             st.error(f"Erro ao exibir DataFrame: {e}. Conteúdo: {msg.content}")
-                            st.markdown(msg.content.split("DATAFRAME_INDEX_TAB2:")[0]) 
+                            if isinstance(msg.content, str):
+                                st.markdown(msg.content.split("DATAFRAME_INDEX_TAB2:")[0] if "DATAFRAME_INDEX_TAB2:" in msg.content else msg.content)
                     else:
-                        st.markdown(msg.content)
+                        st.markdown(msg.content) # Handles non-string content by Streamlit's default markdown
 
         display_chat_history_tab2()
 
@@ -696,73 +711,82 @@ with tab2:
             st.error("Agente de IA (Pandas Analyst) não inicializado. Verifique a chave da API.")
         elif question_tab2 := st.chat_input("Pergunte sobre os dados atuais... (Ex: 'Qual a média de idade aqui?')", key="chat_input_tab2"):
             msgs_tab2.add_user_message(question_tab2)
-            st.chat_message("human").write(question_tab2)
+            # Display user message immediately
+            with st.chat_message("human"):
+                 st.markdown(question_tab2)
+
 
             with st.spinner("👩‍⚕️ A IA está analisando os dados..."):
                 try:
-                    # Ensure data_for_tab2_chat is not empty before sending to agent
                     if data_for_tab2_chat.empty:
                         st.error("Não há dados para a IA analisar. Verifique seus filtros ou o arquivo carregado.")
                         msgs_tab2.add_ai_message("Não há dados para analisar. Por favor, verifique os filtros ou o arquivo carregado.")
-                        st.rerun()
+                        st.rerun() # Use rerun after adding message
                     else:
+                        # Send a copy of the data to the agent
                         pandas_data_analyst.invoke_agent(user_instructions=question_tab2, data_raw=data_for_tab2_chat.copy())
                         result_tab2 = pandas_data_analyst.get_response()
                 except Exception as e:
                     st.error(f"Erro ao processar com IA: {e}")
-                    msgs_tab2.add_ai_message(f"Desculpe, ocorreu um erro durante a análise: {e}")
-                    st.rerun() 
+                    msgs_tab2.add_ai_message(f"Desculpe, ocorreu um erro durante a análise: {str(e)[:500]}") # Truncate long errors
+                    st.rerun() # Use rerun after adding message
+                    st.stop() # Stop execution for this branch on error
 
                 ai_response_message_tab2 = ""
                 if result_tab2 and result_tab2.get("answer"):
-                    ai_response_message_tab2 += result_tab2.get("answer") + "\n\n"
+                    ai_response_message_tab2 += result_tab2.get("answer")
 
+                # Handle Plotly graph in response
                 if result_tab2 and result_tab2.get("routing_preprocessor_decision") == "chart" and result_tab2.get("plotly_graph"):
                     try:
-                        if isinstance(result_tab2.get("plotly_graph"), dict):
+                        if isinstance(result_tab2.get("plotly_graph"), dict): # If it's a JSON dict for Plotly
                             plot_tab2 = go.Figure(result_tab2.get("plotly_graph"))
-                        else: 
+                        else: # Assuming it's already a Plotly Figure object
                             plot_tab2 = result_tab2.get("plotly_graph")
 
                         idx_tab2 = len(st.session_state.plots_tab2)
                         st.session_state.plots_tab2.append(plot_tab2)
-                        ai_response_message_tab2 += f"PLOT_INDEX_TAB2:{idx_tab2}"
+                        ai_response_message_tab2 += f"\nPLOT_INDEX_TAB2:{idx_tab2}" # Append placeholder
                         msgs_tab2.add_ai_message(ai_response_message_tab2)
                         st.rerun() 
                     except Exception as e:
                         error_msg_tab2 = f"Erro ao gerar gráfico: {e}. A IA tentou criar um gráfico, mas falhou."
-                        if not ai_response_message_tab2: ai_response_message_tab2 = "Não houve resposta textual da IA.\n"
+                        if not ai_response_message_tab2.strip(): ai_response_message_tab2 = "Não houve resposta textual da IA.\n"
                         ai_response_message_tab2 += f"\n\n{error_msg_tab2}"
                         msgs_tab2.add_ai_message(ai_response_message_tab2)
                         st.rerun()
 
+                # Handle DataFrame in response
                 elif result_tab2 and result_tab2.get("data_wrangled") is not None: 
                     data_wrangled_tab2 = result_tab2.get("data_wrangled")
                     if not isinstance(data_wrangled_tab2, pd.DataFrame):
                         try:
+                            # Attempt to convert if it's list of dicts or similar
                             data_wrangled_tab2 = pd.DataFrame(data_wrangled_tab2)
                         except Exception as e:
                             error_msg_tab2 = f"Erro ao converter para DataFrame: {e}. A IA tentou retornar uma tabela, mas falhou."
-                            if not ai_response_message_tab2: ai_response_message_tab2 = "Não houve resposta textual da IA.\n"
+                            if not ai_response_message_tab2.strip(): ai_response_message_tab2 = "Não houve resposta textual da IA.\n"
                             ai_response_message_tab2 += f"\n\n{error_msg_tab2}"
                             msgs_tab2.add_ai_message(ai_response_message_tab2)
                             st.rerun()
-                            st.stop() 
+                            st.stop() # Critical error converting, stop this path
                     
+                    # Proceed if conversion was successful or it was already a DataFrame
                     if isinstance(data_wrangled_tab2, pd.DataFrame): 
                         idx_tab2 = len(st.session_state.dataframes_tab2)
                         st.session_state.dataframes_tab2.append(data_wrangled_tab2)
-                        ai_response_message_tab2 += f"DATAFRAME_INDEX_TAB2:{idx_tab2}"
+                        ai_response_message_tab2 += f"\nDATAFRAME_INDEX_TAB2:{idx_tab2}" # Append placeholder
                         msgs_tab2.add_ai_message(ai_response_message_tab2)
                         st.rerun() 
                 else: 
-                    if not (result_tab2 and ai_response_message_tab2.strip()):
+                    # If only text response or no specific content type identified
+                    if not (result_tab2 and ai_response_message_tab2.strip()): # If response is empty or only whitespace
                          ai_response_message_tab2 = "A IA processou sua solicitação, mas não retornou um texto, gráfico ou tabela específica. "
                          ai_response_message_tab2 += f"Resposta completa da IA: {str(result_tab2)}" if result_tab2 else "Nenhuma resposta da IA."
                     msgs_tab2.add_ai_message(ai_response_message_tab2)
                     st.rerun()
 
-# TAB 3: AgGrid Viewer
+# --- TAB 3: AgGrid Viewer ---
 with tab3:
     st.markdown("## 📋 Visualização Geral dos Dados com AgGrid")
     st.markdown("Explore os dados completos de forma interativa com recursos avançados de ordenação, filtragem e seleção.")
@@ -776,18 +800,16 @@ with tab3:
 
         gb.configure_default_column(
             filter=True, sortable=True, resizable=True, editable=False,
-            # --- NEW --- Adding tooltip from cell value
             tooltipValueGetter = JsCode("function(params) { return params.value; }")
         )
         gb.configure_grid_options(
-            domLayout='normal', # 'autoHeight' could also be an option
+            domLayout='normal',
             pagination=True,
             paginationPageSize=20,
             floatingFilter=True,
             rowHoverHighlight=True,
             suppressRowClickSelection=False,
             rowSelection='multiple',
-            # --- NEW --- Enable Excel export with styles
             defaultExcelExportParams = {
                 'processCellCallback': JsCode("""
                     function(params) {
@@ -800,11 +822,10 @@ with tab3:
             },
             excelStyles = [
                 { 'id': 'header', 'font': { 'bold': True } },
-                { 'id': 'highlightUp', 'font': { 'color': '#FF0000' }, 'interior': { 'color': '#FFCCCC', 'pattern': 'Solid'} }, # Red for Up
-                { 'id': 'highlightDown', 'font': { 'color': '#0000FF' }, 'interior': { 'color': '#CCCCFF', 'pattern': 'Solid'} }  # Blue for Down
+                { 'id': 'highlightUp', 'font': { 'color': '#FF0000' }, 'interior': { 'color': '#FFCCCC', 'pattern': 'Solid'} },
+                { 'id': 'highlightDown', 'font': { 'color': '#0000FF' }, 'interior': { 'color': '#CCCCFF', 'pattern': 'Solid'} }
             ],
-
-            localeText = {
+            localeText = { # Extensive localization for AgGrid
                 "page": "Página", "more": "Mais", "to": "até", "of": "de", "next": "Próxima",
                 "last": "Última", "first": "Primeira", "previous": "Anterior", "loadingOoo": "Carregando...",
                 "noRowsToShow": "Nenhum dado para mostrar", "filterOoo": "Filtrar...", "applyFilter": "Aplicar",
@@ -813,7 +834,8 @@ with tab3:
                 "lessThanOrEqual": "Menor ou igual a", "inRange": "Entre", "contains": "Contém",
                 "notContains": "Não contém", "startsWith": "Começa com", "endsWith": "Termina com",
                 "andCondition": "E", "orCondition": "OU", "clearFilter": "Limpar Filtro", "resetFilter": "Redefinir Filtro",
-                "filterConditions": "Condições", "filterValue": "Valor", "filterFrom": "De", "filterTo": "Até",
+                # ... (keep all other localeText entries from the original script)
+                 "filterConditions": "Condições", "filterValue": "Valor", "filterFrom": "De", "filterTo": "Até",
                 "selectAll": "(Selecionar Tudo)", "searchOoo": "Buscar...", "noMatches": "Nenhum resultado",
                 "group": "Grupo", "columns": "Colunas", "filters": "Filtros",
                 "rowGroupColumns": "Colunas para Agrupar por Linha",
@@ -838,24 +860,18 @@ with tab3:
                 "advancedFilterStartsWith": "Começa com", "advancedFilterEndsWith": "Termina com",
             }
         )
-        # --- NEW --- Enable side bar for column selection, grouping etc.
-       # gb.enable_enterprise_modules(enable_sidebar=True)
-
-        # Specific column configurations can be added here if needed
-        # Example: gb.configure_column("idade", type=["numericColumn", "numberColumnFilter", "customNumericFormat"], precision=0)
 
         grid_options = gb.build()
       
         AgGrid(
             df,
             gridOptions=grid_options,
-            height=700, # Increased height
+            height=700,
             width='100%',
-            theme="streamlit", # Using streamlit theme for better integration, 'material' or 'alpine' also good
-            update_mode=GridUpdateMode.MODEL_CHANGED, # More responsive update mode
-            allow_unsafe_jscode=True, # Required for JsCode features
-            fit_columns_on_grid_load=True, # Adjust columns on load
-            # --- NEW --- Adding sidebar configuration
+            theme="streamlit",
+            update_mode=GridUpdateMode.MODEL_CHANGED,
+            allow_unsafe_jscode=True,
+            fit_columns_on_grid_load=True,
             sideBar={'toolPanels': [
                 {
                     'id': 'columns',
@@ -877,103 +893,125 @@ with tab3:
             }
         )
 
-# --- NEW --- TAB 4: BUSINESS INSIGHTS (IA) ---
+# --- TAB 4: Dynamic Business Insights (from second script) ---
 with tab4:
-    st.markdown("## 💡 Insights de Negócios Estratégicos (Gerados por IA)")
-    st.markdown("Obtenha uma análise estratégica do conjunto de dados completo, com foco em tendências, oportunidades e pontos de atenção para a gestão da Unimed.")
+    st.markdown("## 💡 Insights de Negócios Dinâmicos (Gerados por IA)")
+    st.markdown("Obtenha uma análise estratégica com base nos **dados filtrados na Aba 1**.")
     st.markdown("---")
+    
+    # data_for_insights will be df_filtrado_tab1 from Tab 1
+    data_for_insights = df_filtrado_tab1.copy() 
+    is_filtered = not data_for_insights.equals(df) # Check if it's different from the original df
+    num_pac_insights = len(data_for_insights)
 
-    if 'business_insights' not in st.session_state:
-        st.session_state.business_insights = ""
-    if 'generating_insights' not in st.session_state:
-        st.session_state.generating_insights = False
-
-    if not llm:
-        st.error("O modelo de IA não foi inicializado. Verifique sua chave da API na barra lateral.")
-    elif df.empty:
+    st.markdown(f"**Análise Atual Baseada em:** `{num_pac_insights} paciente(s)` (dados conforme Aba 1).")
+    if is_filtered and num_pac_insights < len(df):
+        st.caption(f"Dataset original completo continha `{len(df)}` pacientes. Os insights abaixo são para o subconjunto filtrado.")
+    elif not is_filtered and num_pac_insights > 0:
+        st.caption("Analisando o conjunto de dados completo (nenhum filtro ativo ou filtros não alteraram o conjunto).")
+    elif num_pac_insights == 0 and not df.empty: # Filters resulted in zero patients
+        st.warning("Os filtros atuais na Aba 1 resultaram em nenhum paciente. Não é possível gerar insights para este subconjunto.")
+    elif df.empty: # Original df is empty
         st.warning("Nenhum dado carregado. Por favor, faça o upload de um arquivo CSV para gerar insights.")
-    else:
-        if st.button("🔍 Gerar Novos Insights de Negócios", key="generate_insights_button", disabled=st.session_state.generating_insights, use_container_width=True):
-            st.session_state.generating_insights = True
-            st.session_state.business_insights = "" # Clear previous insights
-            with st.spinner("🧠 A Inteligência Artificial está analisando os dados e elaborando os insights... Por favor, aguarde."):
-                try:
-                    # Prepare a summary of the data for the prompt
-                    num_pacientes = len(df)
-                    num_colunas = len(df.columns)
-                    
-                    lista_status_cols_str = ", ".join([s.replace('_status','').replace('_',' ').title() for s in status_cols[:10]]) + ("..." if len(status_cols) > 10 else "")
-                    
-                    pacientes_com_alt = 0
-                    percent_pacientes_com_alt = 0.0
-                    if "paciente_com_alteracao" in df.columns:
-                        pacientes_com_alt = df['paciente_com_alteracao'].sum()
-                        percent_pacientes_com_alt = (pacientes_com_alt / num_pacientes * 100) if num_pacientes > 0 else 0
-                    
-                    media_exames_alterados_geral = 0.0
-                    media_exames_alterados_com_alt = 0.0
-                    if "qtde_exames_alterados" in df.columns:
-                        media_exames_alterados_geral = df['qtde_exames_alterados'].mean()
-                        if pacientes_com_alt > 0:
-                             media_exames_alterados_com_alt = df[df['paciente_com_alteracao']]['qtde_exames_alterados'].mean()
-
-                    top_alterados_str = ""
-                    if not top_alterados_df.empty:
-                        top_5 = top_alterados_df.head(5)
-                        for _, row in top_5.iterrows():
-                            top_alterados_str += f"- {row['Exame']}: {row['Número de Alterações']} alterações\n"
-                    else:
-                        top_alterados_str = "Nenhum dado de exames alterados proeminentes disponível."
 
 
-                    prompt_template = f"""
-                    Você é um consultor de negócios sênior para uma cooperativa de saúde como a Unimed, especializado em análise de dados laboratoriais para otimização de gestão e cuidado ao paciente.
-                    Sua tarefa é analisar o resumo dos dados de {num_pacientes} pacientes e fornecer insights de negócios estratégicos e acionáveis em português do Brasil.
+    if 'dyn_biz_insights' not in st.session_state: 
+        st.session_state.dyn_biz_insights = ""
+    if 'gen_dyn_insights' not in st.session_state: 
+        st.session_state.gen_dyn_insights = False
 
-                    Resumo dos Dados Analisados:
-                    - Número total de pacientes no dataset: {num_pacientes}
-                    - Número total de colunas de dados (exames, dados demográficos, etc.): {num_colunas}
-                    - Alguns dos principais exames com status de alteração monitorados: {lista_status_cols_str if lista_status_cols_str else "N/A"}
-                    - Pacientes com pelo menos um exame alterado: {pacientes_com_alt} ({percent_pacientes_com_alt:.1f}%)
-                    - Média de exames alterados por paciente (geral): {media_exames_alterados_geral:.2f}
-                    - Média de exames alterados (considerando apenas pacientes com alguma alteração): {media_exames_alterados_com_alt:.2f}
-                    - Top 5 exames com maior número de alterações totais:
-                    {top_alterados_str if top_alterados_str.strip() else "   - Não há dados suficientes para listar os top exames alterados."}
+    if not llm: 
+        st.error("O modelo de IA não foi inicializado. Verifique sua chave da API na barra lateral.")
+    elif not df.empty: # Only show button if there's data to potentially analyze
+        if st.button("🔍 Gerar Novos Insights (Dados Atuais da Aba 1)", key="gen_dyn_biz_insights_btn", disabled=st.session_state.gen_dyn_insights, use_container_width=True):
+            if data_for_insights.empty:
+                st.error("Não há dados para os filtros atuais. Ajuste os filtros na Aba 1 para gerar insights.")
+                st.session_state.dyn_biz_insights = "" # Clear any previous insights
+                st.session_state.gen_dyn_insights = False # Reset button state
+            else:
+                st.session_state.gen_dyn_insights = True
+                st.session_state.dyn_biz_insights = "" # Clear previous insights
+                with st.spinner("🧠 A Inteligência Artificial está analisando os dados selecionados e elaborando os insights... Por favor, aguarde."):
+                    try:
+                        # Prepare a summary of the data_for_insights for the prompt
+                        num_cols_ins = len(data_for_insights.columns)
+                        
+                        # Use status_cols which is globally available and reflects columns ending with _status from the uploaded file
+                        ls_stat_cols_str = ", ".join([s.replace('_status','').replace('_',' ').title() for s in status_cols[:10]]) + ("..." if len(status_cols) > 10 else "")
+                        
+                        pac_alt_ins, pc_pac_alt_ins = 0, 0.0
+                        if "paciente_com_alteracao" in data_for_insights.columns:
+                            pac_alt_ins = data_for_insights['paciente_com_alteracao'].sum()
+                            pc_pac_alt_ins = (pac_alt_ins / num_pac_insights * 100) if num_pac_insights > 0 else 0.0
+                        
+                        med_ex_alt_geral, med_ex_alt_com_alt = 0.0, 0.0
+                        if "qtde_exames_alterados" in data_for_insights.columns and data_for_insights["qtde_exames_alterados"].notna().any():
+                            med_ex_alt_geral = data_for_insights['qtde_exames_alterados'].mean()
+                            # Calculate mean only for those with alterations and non-NaN qtde_exames_alterados
+                            df_pac_alt_ins = data_for_insights[data_for_insights['paciente_com_alteracao'] & data_for_insights['qtde_exames_alterados'].notna()]
+                            if not df_pac_alt_ins.empty:
+                                 med_ex_alt_com_alt = df_pac_alt_ins['qtde_exames_alterados'].mean()
 
-                    Com base neste resumo, por favor, gere de 3 a 5 insights de negócios acionáveis.
-                    Os insights devem ser apresentados em formato de lista (bullet points).
-                    Foque em:
-                    1.  Identificação de tendências de saúde populacional que podem requerer atenção ou programas preventivos.
-                    2.  Oportunidades para otimizar recursos ou processos com base nas alterações mais frequentes.
-                    3.  Sugestões para comunicação ou engajamento com grupos específicos de pacientes.
-                    4.  Possíveis investigações adicionais que a Unimed poderia conduzir para aprofundar o entendimento.
-                    5.  Considerações sobre o impacto financeiro ou operacional das tendências observadas.
+                        # Use the calculate_top_altered_exams function
+                        top_alt_df_ins = calculate_top_altered_exams(data_for_insights, status_cols, ALTERATION_MARKERS)
+                        top_alt_str_ins = ""
+                        if not top_alt_df_ins.empty:
+                            for _, r in top_alt_df_ins.head(5).iterrows(): 
+                                top_alt_str_ins += f"- {r['Exame']}: {r['Número de Alterações']} alterações\n"
+                        else: 
+                            top_alt_str_ins = "Nenhum exame alterado proeminente identificado neste subconjunto de dados."
+                        
+                        dataset_desc = "completo" if not is_filtered else f"filtrado ({num_pac_insights} de {len(df)} pacientes)"
+                        prompt_dyn = f"""
+                        Você é um consultor de negócios sênior para uma cooperativa de saúde como a Unimed, especializado em análise de dados laboratoriais para otimização de gestão e cuidado ao paciente.
+                        Sua tarefa é analisar o resumo do conjunto de dados laboratoriais ({dataset_desc}) de {num_pac_insights} pacientes e fornecer de 3 a 5 insights de negócios estratégicos e acionáveis em português do Brasil.
 
-                    Formato da Resposta (exclusivamente em português do Brasil):
-                    **Principais Insights Estratégicos para a Unimed:**
+                        Resumo dos Dados Analisados ({dataset_desc}):
+                        - Número total de pacientes neste conjunto: {num_pac_insights}
+                        - Número total de colunas de dados (exames, dados demográficos, etc.): {num_cols_ins}
+                        - Alguns dos principais exames com status de alteração monitorados no dataset original: {ls_stat_cols_str if ls_stat_cols_str else "N/A"}
+                        - Pacientes com pelo menos um exame alterado (neste conjunto): {pac_alt_ins} ({pc_pac_alt_ins:.1f}%)
+                        - Média de exames alterados por paciente (neste conjunto, geral): {med_ex_alt_geral:.2f}
+                        - Média de exames alterados (neste conjunto, considerando apenas pacientes com alguma alteração): {med_ex_alt_com_alt:.2f}
+                        - Top 5 exames com maior número de alterações totais (neste conjunto):
+                        {top_alt_str_ins if top_alt_str_ins.strip() and top_alt_str_ins != "Nenhum exame alterado proeminente identificado neste subconjunto de dados." else "   - Não há dados suficientes ou nenhuma alteração proeminente para listar os top exames neste subconjunto."}
 
-                    * **[Insight 1]:** [Descrição detalhada do insight e sugestão de ação]
-                    * **[Insight 2]:** [Descrição detalhada do insight e sugestão de ação]
-                    * ... e assim por diante.
+                        Com base neste resumo específico do conjunto de dados ({dataset_desc}), por favor, gere de 3 a 5 insights de negócios acionáveis.
+                        Os insights devem ser apresentados em formato de lista (bullet points).
+                        Foque em:
+                        1.  Identificação de tendências de saúde específicas deste grupo de pacientes que podem requerer atenção ou programas preventivos direcionados.
+                        2.  Oportunidades para otimizar recursos ou processos com base nas alterações mais frequentes observadas neste subconjunto.
+                        3.  Sugestões para comunicação ou engajamento com este perfil específico de pacientes (se aplicável).
+                        4.  Possíveis investigações adicionais que a Unimed poderia conduzir para aprofundar o entendimento sobre este grupo.
+                        5.  Considerações sobre o impacto financeiro ou operacional das tendências observadas neste subconjunto.
 
-                    Seja claro, conciso e oriente suas sugestões para a realidade de uma operadora de saúde.
-                    Evite jargões excessivamente técnicos na apresentação final dos insights, visando a compreensão por gestores.
-                    """
-                    
-                    response = llm.invoke(prompt_template)
-                    st.session_state.business_insights = response.content
-                except Exception as e:
-                    st.error(f"Ocorreu um erro ao gerar os insights: {e}")
-                    st.session_state.business_insights = "Não foi possível gerar os insights no momento. Tente novamente."
-                finally:
-                    st.session_state.generating_insights = False
-                    st.rerun() # Rerun to update button state and display insights/error
+                        Formato da Resposta (exclusivamente em português do Brasil):
+                        **Principais Insights Estratégicos para a Unimed (referente ao grupo de {num_pac_insights} pacientes analisados):**
 
-        if st.session_state.generating_insights:
-             st.info("Gerando insights... Este processo pode levar alguns instantes.")
-        elif st.session_state.business_insights:
+                        * **[Insight 1]:** [Descrição detalhada do insight e sugestão de ação específica para este grupo]
+                        * **[Insight 2]:** [Descrição detalhada do insight e sugestão de ação específica para este grupo]
+                        * ... e assim por diante.
+
+                        Seja claro, conciso e oriente suas sugestões para a realidade de uma operadora de saúde, considerando as características do grupo analisado.
+                        Evite jargões excessivamente técnicos na apresentação final dos insights, visando a compreensão por gestores.
+                        Se o número de pacientes ({num_pac_insights}) for muito baixo (e.g., menos de 10-20), mencione isso como uma limitação para a generalização dos achados e sugira cautela na interpretação.
+                        """
+                        response = llm.invoke(prompt_dyn) # Assuming llm is ChatOpenAI and has invoke method
+                        st.session_state.dyn_biz_insights = response.content # Adjust if response structure is different (e.g. response.text)
+                    except Exception as e:
+                        st.error(f"Ocorreu um erro ao gerar os insights: {str(e)}")
+                        st.session_state.dyn_biz_insights = "Não foi possível gerar os insights no momento. Tente novamente."
+                    finally:
+                        st.session_state.gen_dyn_insights = False
+                        st.rerun() # Rerun to update button state and display insights/error
+        
+        if st.session_state.gen_dyn_insights:
+             st.info("Gerando insights para os dados selecionados... Este processo pode levar alguns instantes.")
+        elif st.session_state.dyn_biz_insights: # If insights have been generated
             with st.container(border=True):
-                st.markdown("#### 🧠 Análise da IA:")
-                st.markdown(st.session_state.business_insights)
-        elif not st.session_state.generating_insights and not st.session_state.business_insights:
-            st.info("Clique no botão acima para que a Inteligência Artificial gere insights de negócios com base nos dados carregados.")
+                st.markdown("#### 🧠 Análise da IA (Baseada nos Filtros Atuais da Aba 1):")
+                st.markdown(st.session_state.dyn_biz_insights)
+        elif not st.session_state.gen_dyn_insights and not st.session_state.dyn_biz_insights and not data_for_insights.empty:
+            # No insights generated yet, not currently generating, and there's data to analyze
+            st.info("Clique no botão acima para que a Inteligência Artificial gere insights de negócios com base nos dados atualmente filtrados na Aba 1.")
+        # If data_for_insights is empty (but df is not), the message is already handled by the warning at the top of the tab.
