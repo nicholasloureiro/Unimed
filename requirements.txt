@@ -19,7 +19,7 @@ marshmallow==3.26.1
 matplotlib==3.10.1
 matplotlib-inline==0.1.7
 
-numpy
+numpy==2.2.6
 
 openai==1.77.0
 
