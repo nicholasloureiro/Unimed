@@ -1,0 +1,24 @@
+# This is a Streamlit configuration file.
+# Save this as "config.toml" in a folder named ".streamlit"
+# in the root directory of your Streamlit application.
+# For example, if your app is in "unimed_app/app.py",
+# this file should be at "unimed_app/.streamlit/config.toml".
+
+[theme]
+# Sets the base theme of the app. Options are "light" or "dark".
+base = "light"
+
+# Sets the primary color for the app.
+# This color is used for interactive elements like widgets (sliders, buttons, etc.).
+# We're using the Unimed green color you specified in your CSS.
+primaryColor = "#007f3e"
+
+# You can also set other theme colors here if needed, for example:
+# backgroundColor = "#f0f2f6"
+# secondaryBackgroundColor = "#e8f5e9" # Typically sidebar background
+# textColor = "#333333"
+# font = "sans serif" # Options: "sans serif", "serif", "monospace"
+
+# Note: Styles defined in st.markdown("""<style>...</style>""", unsafe_allow_html=True)
+# in your Python script can override or complement these theme settings.
+# The primaryColor here will ensure Streamlit's default widget styling uses Unimed green.
