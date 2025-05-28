@@ -4,6 +4,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import json # Keep for potential future use, though not actively used in main flow
 import collections # Keep for potential future use with PandasDataAnalyst
+import io # Added for in-memory Parquet conversion
 from datetime import datetime
 
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
@@ -129,10 +130,30 @@ ALTERATION_MARKERS = ["↑", "↓", "Alto", "Baixo", "Aumentado", "Diminuído", 
 # --- DATA LOADING AND PREPROCESSING ---
 @st.cache_data
 def load_data(file):
-    df_loaded = pd.read_csv(file)
+    # 1. Read the uploaded CSV file into a pandas DataFrame
+    df_csv = pd.read_csv(file)
+
+    # 2. Convert the DataFrame to Parquet format in-memory
+    # This step adds the CSV -> Parquet conversion.
+    # The resulting DataFrame (df_loaded) is read from this in-memory Parquet format.
+    # Subsequent operations in the app will use this Parquet-loaded DataFrame.
+    # The @st.cache_data decorator will cache the final df_loaded and status_cols_local.
+    st.markdown("ℹ️ Convertendo CSV para formato Parquet otimizado...") # User feedback
+    parquet_buffer = io.BytesIO()
+    df_csv.to_parquet(parquet_buffer, index=False)
+    parquet_buffer.seek(0) # Reset buffer's position to the beginning
+    df_loaded = pd.read_parquet(parquet_buffer)
+    st.markdown("✅ Conversão para Parquet concluída.") # User feedback
+
+
+    # Original preprocessing steps continue from here, operating on the Parquet-loaded df_loaded
     df_loaded.columns = df_loaded.columns.str.lower().str.replace(' ', '_')
     if "data_nascimento" in df_loaded.columns:
-        df_loaded["data_nascimento"] = pd.to_datetime(df_loaded["data_nascimento"], errors="coerce")
+        df_loaded["data_nascimento"] = pd.to_datetime(
+            df_loaded["data_nascimento"].astype(str),
+            errors="coerce",
+            dayfirst=True
+        )
         current_year = datetime.now().year
         df_loaded["idade"] = df_loaded["data_nascimento"].apply(
             lambda x: current_year - x.year if pd.notnull(x) and x.year > 1900 else None
@@ -140,7 +161,7 @@ def load_data(file):
     elif "idade" not in df_loaded.columns:
         st.warning("Coluna 'data_nascimento' ou 'idade' não encontrada. A funcionalidade de filtro por idade pode não funcionar.")
         df_loaded["idade"] = None
-    
+
     status_cols_local = [col for col in df_loaded.columns if col.endswith("_status")]
     if status_cols_local:
         df_loaded["paciente_com_alteracao"] = df_loaded[status_cols_local].apply(lambda row: row.isin(ALTERATION_MARKERS).any(), axis=1)
@@ -252,7 +273,7 @@ def generate_dynamic_insights(current_df, current_status_cols, current_top_alter
             insights_list.append({"title": "Alerta Jovem com Alteração", "value": "N/A", "help": "Sem dados de pacientes jovens com alterações."})
     else:
         insights_list.append({"title": "Alerta Jovem com Alteração", "value": "N/A", "help": "Dados de idade ou de alterações insuficientes."})
-        
+
     if "idade" in current_df.columns and current_df["idade"].notna().any() and "paciente_com_alteracao" in current_df.columns:
         oldest_series = current_df[current_df['paciente_com_alteracao'] & current_df['idade'].notna()]['idade']
         if not oldest_series.empty:
@@ -265,7 +286,7 @@ def generate_dynamic_insights(current_df, current_status_cols, current_top_alter
             insights_list.append({"title": "Alerta Idoso com Alteração", "value": "N/A", "help": "Sem dados de pacientes idosos com alterações."})
     else:
         insights_list.append({"title": "Alerta Idoso com Alteração", "value": "N/A", "help": "Dados de idade ou de alterações insuficientes."})
-        
+
     return insights_list[:6]
 
 
@@ -317,6 +338,7 @@ with tab1:
             if "idade" in df_filtrado_tab1.columns and df_filtrado_tab1["idade"].notna().any():
                 idade_min_val = int(df_filtrado_tab1["idade"].dropna().min())
                 idade_max_val = int(df_filtrado_tab1["idade"].dropna().max())
+
                 if idade_min_val < idade_max_val:
                     faixa_idade = st.slider(
                         "Filtrar por Faixa Etária:",
@@ -325,9 +347,15 @@ with tab1:
                         value=(idade_min_val, idade_max_val),
                         key="tab1_idade_slider"
                     )
-                    df_filtrado_tab1 = df_filtrado_tab1[df_filtrado_tab1["idade"].between(faixa_idade[0], faixa_idade[1])]
+
+                    # Modified filtering to include null values
+                    df_filtrado_tab1 = df_filtrado_tab1[
+                        (df_filtrado_tab1["idade"].between(faixa_idade[0], faixa_idade[1])) |
+                        (df_filtrado_tab1["idade"].isna())
+                    ]
+
                 elif idade_min_val == idade_max_val:
-                     st.caption(f"Todos os pacientes filtrados têm a mesma idade: {idade_min_val} anos.")
+                    st.caption(f"Todos os pacientes filtrados têm a mesma idade: {idade_min_val} anos.")
                 else:
                     st.caption("Dados de idade inconsistentes para criar o filtro.")
             else:
@@ -363,7 +391,7 @@ with tab1:
                     )
                     df_filtrado_tab1 = df_filtrado_tab1[df_filtrado_tab1["qtde_exames_alterados"].between(num_alteracoes_range[0], num_alteracoes_range[1])]
                 elif min_alt == max_alt and min_alt == 0:
-                     st.caption("Nenhum paciente no filtro atual possui exames alterados.")
+                        st.caption("Nenhum paciente no filtro atual possui exames alterados.")
                 elif min_alt == max_alt:
                     st.caption(f"Todos os pacientes no filtro atual possuem {min_alt} exame(s) alterado(s).")
             else:
@@ -508,7 +536,7 @@ with tab1:
                     st.info("Não há dados de quantidade de exames alterados para exibir no histograma (coluna ausente, vazia ou sem variação).")
 
             with viz_col2:
-                 if not df_filtrado_tab1.empty and exames_status_selecionados: # Check if exams were selected
+                if not df_filtrado_tab1.empty and exames_status_selecionados: # Check if exams were selected
                     # Use calculate_top_altered_exams for filtered data
                     top_alt_filtrado_df = calculate_top_altered_exams(df_filtrado_tab1, exames_status_selecionados, ALTERATION_MARKERS)
 
@@ -516,7 +544,7 @@ with tab1:
                         fig_top_alt_filt = px.bar(
                             top_alt_filtrado_df,
                             x="Número de Alterações", # Corrected column name from calculate_top_altered_exams
-                            y="Exame",               # Corrected column name
+                            y="Exame",              # Corrected column name
                             orientation='h',
                             title="Exames Selecionados Mais Alterados (Filtrado)",
                             labels={"Exame": "Exame", "Número de Alterações": "Número de Pacientes com Alteração"},
@@ -530,13 +558,13 @@ with tab1:
                         st.plotly_chart(fig_top_alt_filt, use_container_width=True)
                     else:
                         st.info("Nenhuma alteração nos exames selecionados para o conjunto de dados filtrado.")
-                 elif not exames_status_selecionados:
+                elif not exames_status_selecionados:
                     st.info("Selecione um ou mais exames nos filtros acima para ver o gráfico de alterações.")
-                 else: # df_filtrado_tab1 is empty but exams were selected
+                else: # df_filtrado_tab1 is empty but exams were selected
                     st.info("Nenhum dado no filtro atual para exibir alterações dos exames selecionados.")
 
 
-            st.markdown("---") 
+            st.markdown("---")
             st.markdown("##### Mais Análises Visuais dos Dados Filtrados")
 
             # Age distribution by alteration status
@@ -552,7 +580,7 @@ with tab1:
                         title="Distribuição de Idade por Status de Alteração Geral (Filtrado)",
                         labels={"idade": "Idade", "status_alteracao_label": "Status de Alteração"},
                         barmode="overlay", # Overlay bars for comparison
-                        marginal="box",    # Show box plots on margins
+                        marginal="box",     # Show box plots on margins
                         color_discrete_map={'Com Alteração': '#d62728', 'Sem Alteração': '#007f3e'} # Custom colors
                     )
                     fig_age_alt.update_layout(yaxis_title="Número de Pacientes")
@@ -560,9 +588,9 @@ with tab1:
                 else:
                     st.caption("Dados filtrados vazios, não é possível exibir a distribuição de idade.")
             elif "idade" not in df_filtrado_tab1.columns:
-                 st.caption("Coluna 'idade' não disponível nos dados filtrados para exibir a distribuição por status de alteração.")
+                    st.caption("Coluna 'idade' não disponível nos dados filtrados para exibir a distribuição por status de alteração.")
             else: # Covers case where 'paciente_com_alteracao' might be missing or 'idade' has no data
-                 st.caption("Dados insuficientes ('idade' ou 'paciente_com_alteracao') para exibir a distribuição de idade por status de alteração.")
+                    st.caption("Dados insuficientes ('idade' ou 'paciente_com_alteracao') para exibir a distribuição de idade por status de alteração.")
 
             # Correlation Matrix and Scatter Plot for selected numeric exams
             selected_exam_bases_for_viz = [s.replace("_status", "") for s in exames_status_selecionados]
@@ -584,7 +612,7 @@ with tab1:
                     fig_corr_matrix = px.imshow(
                         corr_matrix,
                         text_auto=True, # Show correlation values on the heatmap
-                        aspect="auto", 
+                        aspect="auto",
                         color_continuous_scale='RdBu_r', # Red-Blue diverging scale, good for correlations
                         title=f"Matriz de Correlação entre Exames Numéricos Selecionados (Filtrado)",
                         labels=dict(color="Correlação"),
@@ -594,7 +622,7 @@ with tab1:
                     st.plotly_chart(fig_corr_matrix, use_container_width=True)
                 else:
                     st.caption("Não foi possível calcular uma matriz de correlação significativa para os exames numéricos selecionados (pouca variação ou dados insuficientes).")
-            elif exames_status_selecionados and len(numeric_exam_cols_for_viz) < 2 : 
+            elif exames_status_selecionados and len(numeric_exam_cols_for_viz) < 2 :
                 st.caption(f"Para a matriz de correlação, selecione pelo menos dois exames com dados numéricos distintos e variados. Encontrados válidos: {len(numeric_exam_cols_for_viz)}.")
 
             # Scatter plot if exactly two numeric exams are selected
@@ -631,15 +659,15 @@ with tab1:
                             exam2_key: exam2_name,
                             "status_alteracao_label": "Status Geral do Paciente"
                         },
-                        marginal_x="box", 
+                        marginal_x="box",
                         marginal_y="box",
                         hover_data=hover_data_scatter if hover_data_scatter else None
                     )
                     st.plotly_chart(fig_scatter, use_container_width=True)
                 else:
-                     st.caption(f"Não há dados suficientes para exibir o gráfico de dispersão entre {exam1_name} e {exam2_name} após remover valores ausentes.")
+                        st.caption(f"Não há dados suficientes para exibir o gráfico de dispersão entre {exam1_name} e {exam2_name} após remover valores ausentes.")
             elif exames_status_selecionados and len(numeric_exam_cols_for_viz) !=2 and len(numeric_exam_cols_for_viz) >=1 :
-                 st.caption("Para um gráfico de dispersão, selecione exatamente dois exames com dados numéricos e variados.")
+                    st.caption("Para um gráfico de dispersão, selecione exatamente dois exames com dados numéricos e variados.")
 
 
 # --- TAB 2: IA CHAT (FOCUSED ON FILTERED DATA IF AVAILABLE, OR GENERAL DF) ---
@@ -648,7 +676,7 @@ with tab2:
     st.markdown("Faça perguntas sobre os dados **visíveis na Aba 1 (aplicando os filtros)**. A IA pode ajudar a realizar análises, gerar tabelas e gráficos.")
 
     # data_for_tab2_chat will be df_filtrado_tab1 from Tab 1
-    data_for_tab2_chat = df_filtrado_tab1.copy() 
+    data_for_tab2_chat = df_filtrado_tab1.copy()
 
     if data_for_tab2_chat.empty and not df.empty: # If filters result in empty, use full df
         st.info("Os filtros atuais na Aba 1 resultaram em nenhum dado. O chat abaixo operará sobre o conjunto de dados completo.")
@@ -667,11 +695,11 @@ with tab2:
         if len(msgs_tab2.messages) == 0:
             initial_message_tab2 = "Olá! Sou sua assistente de IA. Como posso te ajudar a analisar os dados"
             if data_for_tab2_chat.equals(df) and not df_filtrado_tab1.empty: # Using full df because no effective filter
-                 initial_message_tab2 += " **gerais** (nenhum filtro ativo ou os filtros resultaram em todos os dados)?"
+                    initial_message_tab2 += " **gerais** (nenhum filtro ativo ou os filtros resultaram em todos os dados)?"
             elif data_for_tab2_chat.equals(df) and df_filtrado_tab1.empty: # Filtered resulted in empty, so using full df
-                 initial_message_tab2 += " **gerais** (os filtros não retornaram dados, então usando o dataset completo)?"
+                    initial_message_tab2 += " **gerais** (os filtros não retornaram dados, então usando o dataset completo)?"
             else: # Using filtered data
-                 initial_message_tab2 += " **filtrados** da Aba 1?"
+                    initial_message_tab2 += " **filtrados** da Aba 1?"
             msgs_tab2.add_ai_message(initial_message_tab2)
 
 
@@ -707,13 +735,13 @@ with tab2:
 
         display_chat_history_tab2()
 
-        if not pandas_data_analyst: 
+        if not pandas_data_analyst:
             st.error("Agente de IA (Pandas Analyst) não inicializado. Verifique a chave da API.")
         elif question_tab2 := st.chat_input("Pergunte sobre os dados atuais... (Ex: 'Qual a média de idade aqui?')", key="chat_input_tab2"):
             msgs_tab2.add_user_message(question_tab2)
             # Display user message immediately
             with st.chat_message("human"):
-                 st.markdown(question_tab2)
+                st.markdown(question_tab2)
 
 
             with st.spinner("👩‍⚕️ A IA está analisando os dados..."):
@@ -748,7 +776,7 @@ with tab2:
                         st.session_state.plots_tab2.append(plot_tab2)
                         ai_response_message_tab2 += f"\nPLOT_INDEX_TAB2:{idx_tab2}" # Append placeholder
                         msgs_tab2.add_ai_message(ai_response_message_tab2)
-                        st.rerun() 
+                        st.rerun()
                     except Exception as e:
                         error_msg_tab2 = f"Erro ao gerar gráfico: {e}. A IA tentou criar um gráfico, mas falhou."
                         if not ai_response_message_tab2.strip(): ai_response_message_tab2 = "Não houve resposta textual da IA.\n"
@@ -757,7 +785,7 @@ with tab2:
                         st.rerun()
 
                 # Handle DataFrame in response
-                elif result_tab2 and result_tab2.get("data_wrangled") is not None: 
+                elif result_tab2 and result_tab2.get("data_wrangled") is not None:
                     data_wrangled_tab2 = result_tab2.get("data_wrangled")
                     if not isinstance(data_wrangled_tab2, pd.DataFrame):
                         try:
@@ -770,22 +798,23 @@ with tab2:
                             msgs_tab2.add_ai_message(ai_response_message_tab2)
                             st.rerun()
                             st.stop() # Critical error converting, stop this path
-                    
+
                     # Proceed if conversion was successful or it was already a DataFrame
-                    if isinstance(data_wrangled_tab2, pd.DataFrame): 
+                    if isinstance(data_wrangled_tab2, pd.DataFrame):
                         idx_tab2 = len(st.session_state.dataframes_tab2)
                         st.session_state.dataframes_tab2.append(data_wrangled_tab2)
                         ai_response_message_tab2 += f"\nDATAFRAME_INDEX_TAB2:{idx_tab2}" # Append placeholder
                         msgs_tab2.add_ai_message(ai_response_message_tab2)
-                        st.rerun() 
-                else: 
+                        st.rerun()
+                else:
                     # If only text response or no specific content type identified
                     if not (result_tab2 and ai_response_message_tab2.strip()): # If response is empty or only whitespace
-                         ai_response_message_tab2 = "A IA processou sua solicitação, mas não retornou um texto, gráfico ou tabela específica. "
-                         ai_response_message_tab2 += f"Resposta completa da IA: {str(result_tab2)}" if result_tab2 else "Nenhuma resposta da IA."
+                            ai_response_message_tab2 = "A IA processou sua solicitação, mas não retornou um texto, gráfico ou tabela específica. "
+                            ai_response_message_tab2 += f"Resposta completa da IA: {str(result_tab2)}" if result_tab2 else "Nenhuma resposta da IA."
                     msgs_tab2.add_ai_message(ai_response_message_tab2)
                     st.rerun()
 
+# --- TAB 3: AgGrid Viewer ---
 # --- TAB 3: AgGrid Viewer ---
 with tab3:
     st.markdown("## 📋 Visualização Geral dos Dados com AgGrid")
@@ -802,6 +831,119 @@ with tab3:
             filter=True, sortable=True, resizable=True, editable=False,
             tooltipValueGetter = JsCode("function(params) { return params.value; }")
         )
+
+        # --- Custom configuration for 'data_nascimento' column ---
+        if "data_nascimento" in df.columns:
+            js_value_formatter_date = JsCode("""
+                function(params) {
+                    if (params.value) { // params.value will be null for NaT from pandas
+                        try {
+                            // Pandas datetime objects are often serialized as ISO strings to JS
+                            // or AgGrid handles them. AgGrid expects data in YYYY-MM-DD for date objects.
+                            // We will re-format to dd/mm/yyyy for display.
+                            var date = new Date(params.value);
+                            if (isNaN(date.getTime())) { // Check if date is invalid
+                                return ''; // Or 'Data Inválida' if you prefer
+                            }
+                            let day = date.getDate().toString().padStart(2, '0');
+                            let month = (date.getMonth() + 1).toString().padStart(2, '0'); // Month is 0-indexed
+                            let year = date.getFullYear();
+                            if (year < 1900 || year > 2100) return ''; // Filter out unreasonable years
+                            return day + '/' + month + '/' + year;
+                        } catch (e) {
+                            return ''; // Error during formatting
+                        }
+                    }
+                    return ''; // For NaT (null) values, display an empty string
+                }
+            """)
+
+            gb.configure_column(
+                "data_nascimento",
+                headerName="Data Nascimento", # Friendlier header
+                valueFormatter=js_value_formatter_date,
+                filter='agDateColumnFilter', # Use AgGrid's date filter
+                filterParams={
+                    'comparator': JsCode("""
+                        function(filterLocalDateAtMidnight, cellValue) {
+                            if (cellValue == null) { // Handles NaT (null) values from pandas
+                                return filterLocalDateAtMidnight == null ? 0 : -1; // Adjust based on how you want NaT to behave in filters
+                            }
+                            var cellDate = new Date(cellValue); // cellValue from pandas is typically ISO string or date object part
+                                if (isNaN(cellDate.getTime())) return -1; // Should not happen if valueFormatter works but good practice
+
+                            // Normalize cellDate to midnight UTC for comparison with filter's date (which is also midnight UTC)
+                            cellDate.setUTCHours(0,0,0,0);
+
+                            if (filterLocalDateAtMidnight.getTime() === cellDate.getTime()) {
+                                return 0;
+                            }
+                            if (cellDate < filterLocalDateAtMidnight) {
+                                return -1;
+                            }
+                            if (cellDate > filterLocalDateAtMidnight) {
+                                return 1;
+                            }
+                            return 0;
+                        }
+                    """),
+                    'browserDatePicker': True, # Use the browser's native date picker in the filter
+                    'minValidYear': 1900,
+                    'maxValidYear': datetime.now().year + 1, # Sensible max year
+                    'inRangeInclusive': True,
+                    'applyButton': True,      # Show apply button in filter
+                    'resetButton': True,      # Show reset button in filter
+                    'debounceMs': 500,        # Debounce filter input
+                    # This parser helps the filter understand dd/mm/yyyy typed by the user
+                    'dateParser': JsCode("""
+                        function(value) { // value is string from filter input e.g., "28/05/2024"
+                            if (value == null || value === "") return null;
+                            const parts = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+                            if (parts) {
+                                const day = parseInt(parts[1], 10);
+                                const month = parseInt(parts[2], 10) - 1; // JS months are 0-indexed
+                                const year = parseInt(parts[3], 10);
+                                // Basic validation for year, month, day ranges
+                                if (year >= 1900 && year <= 2100 && month >= 0 && month <= 11) {
+                                    const d = new Date(Date.UTC(year, month, day)); // Use UTC to match comparator logic
+                                    // Final check to ensure date wasn't, e.g., Feb 30th becoming Mar 2nd
+                                    if (d.getUTCFullYear() === year && d.getUTCMonth() === month && d.getUTCDate() === day) {
+                                        return d;
+                                    }
+                                }
+                            }
+                            return null; // Return null if typed input parsing fails
+                        }
+                    """),
+                    # This formatter ensures dates in the filter's input field are also dd/mm/yyyy
+                    'dateFormatter': JsCode("""
+                        function(value){ // value is a Date object from the date picker or parsed input
+                            if (value == null) return null;
+                            try {
+                                let date = value;
+                                if (!(date instanceof Date)) { date = new Date(value); }
+
+                                if (isNaN(date.getTime())) return null;
+
+                                // Use getUTCDate, getUTCMonth, getUTCFullYear if dates are consistently UTC
+                                let day = date.getDate().toString().padStart(2, '0');
+                                let month = (date.getMonth() + 1).toString().padStart(2, '0');
+                                let year = date.getFullYear();
+                                return day + '/' + month + '/' + year;
+                            } catch (e) {
+                                return null;
+                            }
+                        }
+                    """)
+                },
+                # Ensure sorting works correctly for dates
+                # Pandas usually converts to datetime64[ns] which AgGrid handles well for sorting
+                # If explicit sort type is needed:
+                # 'cellDataType': 'dateString', # If you pass strings; 'date' if AgGrid handles Date objects well from Python
+                # 'comparator': JsCode("(date1, date2) => new Date(date1) - new Date(date2)") # If simple string comparison fails
+            )
+        # --- End of custom configuration for 'data_nascimento' ---
+
         gb.configure_grid_options(
             domLayout='normal',
             pagination=True,
@@ -816,6 +958,20 @@ with tab3:
                         if (params.value && typeof params.value === 'string' && (params.value.includes('↑') || params.value.includes('↓'))) {
                             return { styleId: params.value.includes('↑') ? 'highlightUp' : 'highlightDown' };
                         }
+                        // ADDED: If it's the data_nascimento column, format the date for Excel
+                        if (params.column.getColDef().field === 'data_nascimento' && params.value) {
+                            try {
+                                var date = new Date(params.value);
+                                if (!isNaN(date.getTime())) {
+                                    let day = date.getDate().toString().padStart(2, '0');
+                                    let month = (date.getMonth() + 1).toString().padStart(2, '0');
+                                    let year = date.getFullYear();
+                                    // Excel usually prefers YYYY-MM-DD or system locale for date recognition
+                                    // Alternatively, pass as string dd/mm/yyyy and let Excel try to parse
+                                    return month + '/' + day + '/' + year; // Or dd/mm/yyyy as string
+                                }
+                            } catch(e) { /* ignore if formatting fails */ }
+                        }
                         return null;
                     }
                 """),
@@ -825,7 +981,7 @@ with tab3:
                 { 'id': 'highlightUp', 'font': { 'color': '#FF0000' }, 'interior': { 'color': '#FFCCCC', 'pattern': 'Solid'} },
                 { 'id': 'highlightDown', 'font': { 'color': '#0000FF' }, 'interior': { 'color': '#CCCCFF', 'pattern': 'Solid'} }
             ],
-            localeText = { # Extensive localization for AgGrid
+            localeText = { # Keep your extensive localization
                 "page": "Página", "more": "Mais", "to": "até", "of": "de", "next": "Próxima",
                 "last": "Última", "first": "Primeira", "previous": "Anterior", "loadingOoo": "Carregando...",
                 "noRowsToShow": "Nenhum dado para mostrar", "filterOoo": "Filtrar...", "applyFilter": "Aplicar",
@@ -834,8 +990,7 @@ with tab3:
                 "lessThanOrEqual": "Menor ou igual a", "inRange": "Entre", "contains": "Contém",
                 "notContains": "Não contém", "startsWith": "Começa com", "endsWith": "Termina com",
                 "andCondition": "E", "orCondition": "OU", "clearFilter": "Limpar Filtro", "resetFilter": "Redefinir Filtro",
-                # ... (keep all other localeText entries from the original script)
-                 "filterConditions": "Condições", "filterValue": "Valor", "filterFrom": "De", "filterTo": "Até",
+                "filterConditions": "Condições", "filterValue": "Valor", "filterFrom": "De", "filterTo": "Até",
                 "selectAll": "(Selecionar Tudo)", "searchOoo": "Buscar...", "noMatches": "Nenhum resultado",
                 "group": "Grupo", "columns": "Colunas", "filters": "Filtros",
                 "rowGroupColumns": "Colunas para Agrupar por Linha",
@@ -862,16 +1017,17 @@ with tab3:
         )
 
         grid_options = gb.build()
-      
+
         AgGrid(
             df,
             gridOptions=grid_options,
             height=700,
             width='100%',
-            theme="streamlit",
+            theme="streamlit", # or "balham", "alpine", etc.
             update_mode=GridUpdateMode.MODEL_CHANGED,
             allow_unsafe_jscode=True,
-            fit_columns_on_grid_load=True,
+            fit_columns_on_grid_load=True, # Adjust as needed
+            # Consider adding enableRangeSelection=True for Excel-like copy/paste
             sideBar={'toolPanels': [
                 {
                     'id': 'columns',
@@ -898,9 +1054,9 @@ with tab4:
     st.markdown("## 💡 Insights de Negócios Dinâmicos (Gerados por IA)")
     st.markdown("Obtenha uma análise estratégica com base nos **dados filtrados na Aba 1**.")
     st.markdown("---")
-    
+
     # data_for_insights will be df_filtrado_tab1 from Tab 1
-    data_for_insights = df_filtrado_tab1.copy() 
+    data_for_insights = df_filtrado_tab1.copy()
     is_filtered = not data_for_insights.equals(df) # Check if it's different from the original df
     num_pac_insights = len(data_for_insights)
 
@@ -915,12 +1071,12 @@ with tab4:
         st.warning("Nenhum dado carregado. Por favor, faça o upload de um arquivo CSV para gerar insights.")
 
 
-    if 'dyn_biz_insights' not in st.session_state: 
+    if 'dyn_biz_insights' not in st.session_state:
         st.session_state.dyn_biz_insights = ""
-    if 'gen_dyn_insights' not in st.session_state: 
+    if 'gen_dyn_insights' not in st.session_state:
         st.session_state.gen_dyn_insights = False
 
-    if not llm: 
+    if not llm:
         st.error("O modelo de IA não foi inicializado. Verifique sua chave da API na barra lateral.")
     elif not df.empty: # Only show button if there's data to potentially analyze
         if st.button("🔍 Gerar Novos Insights (Dados Atuais da Aba 1)", key="gen_dyn_biz_insights_btn", disabled=st.session_state.gen_dyn_insights, use_container_width=True):
@@ -935,32 +1091,32 @@ with tab4:
                     try:
                         # Prepare a summary of the data_for_insights for the prompt
                         num_cols_ins = len(data_for_insights.columns)
-                        
+
                         # Use status_cols which is globally available and reflects columns ending with _status from the uploaded file
                         ls_stat_cols_str = ", ".join([s.replace('_status','').replace('_',' ').title() for s in status_cols[:10]]) + ("..." if len(status_cols) > 10 else "")
-                        
+
                         pac_alt_ins, pc_pac_alt_ins = 0, 0.0
                         if "paciente_com_alteracao" in data_for_insights.columns:
                             pac_alt_ins = data_for_insights['paciente_com_alteracao'].sum()
                             pc_pac_alt_ins = (pac_alt_ins / num_pac_insights * 100) if num_pac_insights > 0 else 0.0
-                        
+
                         med_ex_alt_geral, med_ex_alt_com_alt = 0.0, 0.0
                         if "qtde_exames_alterados" in data_for_insights.columns and data_for_insights["qtde_exames_alterados"].notna().any():
                             med_ex_alt_geral = data_for_insights['qtde_exames_alterados'].mean()
                             # Calculate mean only for those with alterations and non-NaN qtde_exames_alterados
                             df_pac_alt_ins = data_for_insights[data_for_insights['paciente_com_alteracao'] & data_for_insights['qtde_exames_alterados'].notna()]
                             if not df_pac_alt_ins.empty:
-                                 med_ex_alt_com_alt = df_pac_alt_ins['qtde_exames_alterados'].mean()
+                                med_ex_alt_com_alt = df_pac_alt_ins['qtde_exames_alterados'].mean()
 
                         # Use the calculate_top_altered_exams function
                         top_alt_df_ins = calculate_top_altered_exams(data_for_insights, status_cols, ALTERATION_MARKERS)
                         top_alt_str_ins = ""
                         if not top_alt_df_ins.empty:
-                            for _, r in top_alt_df_ins.head(5).iterrows(): 
+                            for _, r in top_alt_df_ins.head(5).iterrows():
                                 top_alt_str_ins += f"- {r['Exame']}: {r['Número de Alterações']} alterações\n"
-                        else: 
+                        else:
                             top_alt_str_ins = "Nenhum exame alterado proeminente identificado neste subconjunto de dados."
-                        
+
                         dataset_desc = "completo" if not is_filtered else f"filtrado ({num_pac_insights} de {len(df)} pacientes)"
                         prompt_dyn = f"""
                         Você é um consultor de negócios sênior para uma cooperativa de saúde como a Unimed, especializado em análise de dados laboratoriais para otimização de gestão e cuidado ao paciente.
@@ -1004,9 +1160,9 @@ with tab4:
                     finally:
                         st.session_state.gen_dyn_insights = False
                         st.rerun() # Rerun to update button state and display insights/error
-        
+
         if st.session_state.gen_dyn_insights:
-             st.info("Gerando insights para os dados selecionados... Este processo pode levar alguns instantes.")
+                st.info("Gerando insights para os dados selecionados... Este processo pode levar alguns instantes.")
         elif st.session_state.dyn_biz_insights: # If insights have been generated
             with st.container(border=True):
                 st.markdown("#### 🧠 Análise da IA (Baseada nos Filtros Atuais da Aba 1):")
